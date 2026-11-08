@@ -1,0 +1,516 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>폭포 수행 스탑워치</title>
+<style>
+  :root {
+    --glass: rgba(8, 20, 28, .58);
+    --line: rgba(255, 255, 255, .14);
+    --text: #eef6fb;
+    --muted: #9fb6c6;
+    --accent: #ffb04a;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%; overflow: hidden;
+    background: #0b1a24; color: var(--text);
+    font-family: "Pretendard", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif;
+  }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  .panel {
+    position: fixed; top: 24px; left: 24px; width: 310px; padding: 20px;
+    border-radius: 18px; background: var(--glass);
+    -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+    border: 1px solid var(--line); box-shadow: 0 10px 40px rgba(0,0,0,.35);
+  }
+  .title { font-size: 12px; letter-spacing: .22em; color: var(--muted); margin-bottom: 6px; }
+  .time {
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+    font-size: 50px; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: -.02em;
+    line-height: 1.1;
+  }
+  .time small { font-size: 28px; color: var(--muted); }
+  .level { display: flex; justify-content: space-between; align-items: baseline; margin-top: 12px; font-size: 14px; color: var(--muted); }
+  .level b { color: var(--accent); font-size: 18px; }
+  .bar { height: 6px; border-radius: 3px; background: rgba(255,255,255,.1); margin-top: 8px; overflow: hidden; }
+  .bar i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, #6ccaff, #e8f8ff); }
+  .btns { display: grid; grid-template-columns: 1.4fr 1fr 1fr; gap: 8px; margin-top: 16px; }
+  button {
+    font: inherit; font-size: 15px; padding: 11px 0; border-radius: 10px;
+    border: 1px solid var(--line); background: rgba(255,255,255,.08); color: var(--text); cursor: pointer;
+  }
+  button:hover:not(:disabled) { background: rgba(255,255,255,.16); }
+  button.primary { background: var(--accent); color: #2a1600; border-color: transparent; font-weight: 700; }
+  button.primary:hover { background: #ffc06c; }
+  button:disabled { opacity: .4; cursor: default; }
+  .laps { margin-top: 14px; max-height: 180px; overflow: auto; font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
+  .laps div { display: flex; justify-content: space-between; padding: 5px 2px; border-top: 1px solid var(--line); color: var(--muted); }
+  .laps div span:nth-child(2) { color: var(--text); }
+  .hint { margin-top: 10px; font-size: 11px; color: var(--muted); }
+  .toast {
+    position: fixed; left: 50%; top: 42%; transform: translate(-50%, -50%) scale(.96);
+    font-size: 26px; font-weight: 700; letter-spacing: .08em; color: #fff;
+    text-shadow: 0 2px 20px rgba(0,0,0,.7); opacity: 0; transition: opacity .5s, transform .5s;
+    pointer-events: none; white-space: nowrap;
+  }
+  .toast.show { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  @media (max-width: 640px) {
+    .panel { left: 16px; right: 16px; top: 16px; width: auto; padding: 16px; }
+    .time { font-size: 40px; }
+    .laps { max-height: 84px; }
+    .hint { display: none; }
+    .toast { font-size: 19px; top: 55%; }
+  }
+</style>
+</head>
+<body>
+<canvas id="scene"></canvas>
+
+<div class="panel">
+  <div class="title">瀑布修行 · 폭포 수행</div>
+  <div class="time" id="time">00:00<small>.00</small></div>
+  <div class="level"><span>수행 단계</span><b id="lvl">Lv.0 물방울</b></div>
+  <div class="bar"><i id="prog"></i></div>
+  <div class="btns">
+    <button class="primary" id="btnStart">시작</button>
+    <button id="btnLap" disabled>랩</button>
+    <button id="btnReset">리셋</button>
+  </div>
+  <div class="laps" id="laps"></div>
+  <div class="hint">Space 시작/정지 · L 랩 · R 리셋 · 10초마다 물줄기가 거세집니다</div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+(() => {
+  // ───────── 스탑워치 ─────────
+  const $ = id => document.getElementById(id);
+  const timeEl = $('time'), lvlEl = $('lvl'), progEl = $('prog'), lapsEl = $('laps'), toastEl = $('toast');
+  const btnStart = $('btnStart'), btnLap = $('btnLap'), btnReset = $('btnReset');
+  const NAMES = ['물방울', '실개천', '물줄기', '소나기', '장대비', '급류', '폭포', '대폭포', '천둥폭포', '무아지경'];
+
+  let running = false, accMs = 0, startAt = 0, laps = [], lastLevel = 0, toastTimer = 0;
+
+  const elapsed = () => accMs + (running ? performance.now() - startAt : 0);
+  const pad = n => String(n).padStart(2, '0');
+  function parts(ms) {
+    return { h: Math.floor(ms / 3600000), m: Math.floor(ms / 60000) % 60, s: Math.floor(ms / 1000) % 60, cs: Math.floor(ms / 10) % 100 };
+  }
+  function fmtHTML(ms) { const p = parts(ms); return (p.h ? p.h + ':' : '') + pad(p.m) + ':' + pad(p.s) + '<small>.' + pad(p.cs) + '</small>'; }
+  function fmtText(ms) { const p = parts(ms); return (p.h ? p.h + ':' : '') + pad(p.m) + ':' + pad(p.s) + '.' + pad(p.cs); }
+  const levelName = l => 'Lv.' + l + ' ' + NAMES[Math.min(l, NAMES.length - 1)];
+
+  function toggle() {
+    if (running) { accMs += performance.now() - startAt; running = false; }
+    else { startAt = performance.now(); running = true; }
+    updateButtons();
+  }
+  function lap() {
+    if (!running) return;
+    const e = elapsed(), prev = laps.length ? laps[0].total : 0;
+    laps.unshift({ n: laps.length + 1, split: e - prev, total: e });
+    renderLaps();
+  }
+  function reset() {
+    running = false; accMs = 0; laps = []; lastLevel = 0;
+    renderLaps(); updateButtons();
+  }
+  function updateButtons() {
+    btnStart.textContent = running ? '일시정지' : (accMs > 0 ? '계속' : '시작');
+    btnLap.disabled = !running;
+  }
+  function renderLaps() {
+    lapsEl.innerHTML = laps.map(l => `<div><span>#${l.n}</span><span>+${fmtText(l.split)}</span><span>${fmtText(l.total)}</span></div>`).join('');
+  }
+  function toast(msg) {
+    toastEl.textContent = msg; toastEl.classList.add('show');
+    clearTimeout(toastTimer); toastTimer = setTimeout(() => toastEl.classList.remove('show'), 1800);
+  }
+
+  btnStart.onclick = e => { toggle(); e.currentTarget.blur(); };
+  btnLap.onclick = e => { lap(); e.currentTarget.blur(); };
+  btnReset.onclick = e => { reset(); e.currentTarget.blur(); };
+  addEventListener('keydown', e => {
+    if (e.code === 'Space') { e.preventDefault(); toggle(); }
+    else if (e.code === 'KeyL') lap();
+    else if (e.code === 'KeyR') reset();
+  });
+
+  // ───────── 장면 ─────────
+  const cv = $('scene'), ctx = cv.getContext('2d');
+  const bg = document.createElement('canvas'), fg = document.createElement('canvas');
+  let W = 0, H = 0, dpr = 1, G = {};
+
+  function rng(seed) {
+    return () => { seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+  }
+
+  function resize() {
+    dpr = Math.min(devicePixelRatio || 1, 2);
+    W = innerWidth; H = innerHeight;
+    cv.width = W * dpr; cv.height = H * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const s = Math.min(W / 600, H / 700);
+    const cx = W > 640 ? W * 0.6 : W * 0.5;
+    const poolY = H * 0.84;
+    G = { s, cx, poolY, lipY: H * 0.14, headY: poolY - 142 * s };
+    buildBG(); buildFG();
+  }
+
+  function buildBG() {
+    bg.width = W * dpr; bg.height = H * dpr;
+    const b = bg.getContext('2d'); b.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const { cx, lipY, poolY, s } = G, R = rng(11);
+
+    // 하늘
+    let g = b.createLinearGradient(0, 0, 0, poolY);
+    g.addColorStop(0, '#0c2333'); g.addColorStop(0.5, '#3a6675'); g.addColorStop(1, '#58808a');
+    b.fillStyle = g; b.fillRect(0, 0, W, H);
+    // 달
+    const mx = W > 640 ? W * 0.86 : W * 0.82, my = lipY * 0.45 + 20;
+    g = b.createRadialGradient(mx, my, 0, mx, my, 120);
+    g.addColorStop(0, 'rgba(255,245,220,.45)'); g.addColorStop(1, 'rgba(255,245,220,0)');
+    b.fillStyle = g; b.fillRect(mx - 120, my - 120, 240, 240);
+    b.fillStyle = '#f6efdc'; b.beginPath(); b.arc(mx, my, 16, 0, Math.PI * 2); b.fill();
+
+    // 먼 산
+    const ridge = (base, amp, color, freq, ph) => {
+      b.fillStyle = color; b.beginPath(); b.moveTo(0, H);
+      for (let x = 0; x <= W + 10; x += 10) {
+        const y = base - amp * (0.55 + 0.45 * Math.sin(x * freq + ph)) - amp * 0.25 * Math.sin(x * freq * 3.1 + ph * 2) - R() * 3;
+        b.lineTo(x, y);
+      }
+      b.lineTo(W, H); b.fill();
+    };
+    ridge(lipY * 0.9 + 40, 70, '#335a68', 0.006, 1.2);
+    ridge(lipY + 40, 50, '#26495a', 0.009, 4.0);
+
+    // 절벽
+    const notch = 125 * s, top = [];
+    b.beginPath(); b.moveTo(0, H);
+    for (let x = 0; x <= W + 8; x += 8) {
+      const d = Math.abs(x - cx); let y;
+      if (d < notch) y = lipY;
+      else { const k = Math.min(1, (d - notch) / (W * 0.28)); y = lipY - 12 - k * k * lipY * 0.65 - R() * 12; }
+      top.push([x, y]); b.lineTo(x, y);
+    }
+    b.lineTo(W, H); b.closePath();
+    g = b.createLinearGradient(0, lipY, 0, poolY);
+    g.addColorStop(0, '#34444a'); g.addColorStop(1, '#151d21');
+    b.fillStyle = g; b.fill();
+
+    b.save(); b.clip();
+    // 암석 결
+    for (let i = 0; i < 260; i++) {
+      const x = R() * W, y = lipY - 80 + R() * (poolY - lipY + 80), w = (20 + R() * 90), h = (8 + R() * 30);
+      b.fillStyle = R() < 0.5 ? 'rgba(255,255,255,.035)' : 'rgba(0,0,0,.16)';
+      b.beginPath(); b.moveTo(x, y); b.lineTo(x + w * 0.6, y - h * 0.3); b.lineTo(x + w, y + h * 0.4); b.lineTo(x + w * 0.3, y + h); b.closePath(); b.fill();
+    }
+    b.strokeStyle = 'rgba(0,0,0,.25)'; b.lineWidth = 1.5;
+    for (let i = 0; i < 40; i++) {
+      const y = lipY + R() * (poolY - lipY), x = R() * W, len = 40 + R() * 160;
+      b.beginPath(); b.moveTo(x, y); b.quadraticCurveTo(x + len / 2, y + (R() - 0.5) * 20, x + len, y + (R() - 0.5) * 10); b.stroke();
+    }
+    // 폭포 뒤 젖은 바위
+    g = b.createLinearGradient(cx - notch * 1.4, 0, cx + notch * 1.4, 0);
+    g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(0.5, 'rgba(0,10,15,.45)'); g.addColorStop(1, 'rgba(0,0,0,0)');
+    b.fillStyle = g; b.fillRect(cx - notch * 1.4, lipY, notch * 2.8, poolY - lipY);
+    b.restore();
+
+    // 이끼
+    for (const [x, y] of top) {
+      if (R() < 0.7) {
+        b.fillStyle = `rgba(${60 + R() * 40 | 0},${110 + R() * 50 | 0},${60 + R() * 30 | 0},.75)`;
+        b.beginPath(); b.ellipse(x, y + 3, 6 + R() * 8, 3 + R() * 4, 0, 0, Math.PI * 2); b.fill();
+      }
+    }
+    // 소나무 실루엣
+    const pine = (x, y, h) => {
+      b.fillStyle = '#0f2129';
+      b.fillRect(x - h * 0.03, y - h * 0.25, h * 0.06, h * 0.25);
+      for (let i = 0; i < 4; i++) {
+        const ty = y - h * 0.2 - i * h * 0.2, w = h * (0.32 - i * 0.06);
+        b.beginPath(); b.moveTo(x - w, ty); b.lineTo(x, ty - h * 0.35); b.lineTo(x + w, ty); b.closePath(); b.fill();
+      }
+    };
+    for (let i = 0; i < top.length; i += 1) {
+      const [x, y] = top[i];
+      if (Math.abs(x - cx) > notch + 40 && R() < 0.09) pine(x, y + 4, (50 + R() * 70) * Math.max(0.6, s * 0.7));
+    }
+  }
+
+  function buildFG() {
+    fg.width = W * dpr; fg.height = H * dpr;
+    const f = fg.getContext('2d'); f.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const { poolY, s } = G, R = rng(5);
+    const boulder = (pts, light) => {
+      f.beginPath(); f.moveTo(pts[0][0], pts[0][1]);
+      for (let i = 1; i < pts.length; i++) {
+        const [x0, y0] = pts[i - 1], [x1, y1] = pts[i];
+        f.quadraticCurveTo(x0, y0, (x0 + x1) / 2, (y0 + y1) / 2);
+      }
+      f.lineTo(pts[pts.length - 1][0], pts[pts.length - 1][1]); f.closePath();
+      const g = f.createLinearGradient(0, poolY - 120 * s, 0, H);
+      g.addColorStop(0, light); g.addColorStop(1, '#070c0e');
+      f.fillStyle = g; f.fill();
+    };
+    const lw = Math.min(W * 0.28, 260 * s);
+    boulder([[0, H], [0, poolY - 90 * s], [lw * 0.35, poolY - 110 * s], [lw * 0.75, poolY - 40 * s], [lw, poolY + 10 * s], [lw * 1.1, H]], '#26323a');
+    boulder([[W, H], [W, poolY - 70 * s], [W - lw * 0.4, poolY - 95 * s], [W - lw * 0.8, poolY - 20 * s], [W - lw, poolY + 20 * s], [W - lw * 1.05, H]], '#222d33');
+    // 풀
+    f.strokeStyle = 'rgba(70,120,70,.8)'; f.lineWidth = 1.5;
+    for (let i = 0; i < 50; i++) {
+      const left = i < 25, x = left ? R() * lw * 0.7 : W - R() * lw * 0.7;
+      const y = poolY - (left ? 95 : 80) * s + R() * 30 * s, h = (10 + R() * 22) * s;
+      f.beginPath(); f.moveTo(x, y); f.quadraticCurveTo(x + (R() - 0.5) * 10, y - h * 0.6, x + (R() - 0.5) * 14, y - h); f.stroke();
+    }
+  }
+
+  // 수도승 형태(로컬 좌표, s=1, 원점=수면 중앙)
+  function surfLocal(dx) {
+    let y = 0;
+    const ad = Math.abs(dx);
+    if (ad < 20) y = Math.min(y, -142 - Math.sqrt(400 - dx * dx));
+    if (ad < 48) { const t = dx / 48; y = Math.min(y, -122 + 8 * t * t); }
+    if (ad < 52) y = Math.min(y, -108);
+    if (ad < 76) { const t = dx / 76; y = Math.min(y, -50 - 17 * Math.sqrt(1 - t * t)); }
+    if (ad < 100) { const t = dx / 100; y = Math.min(y, -40 + 44 * t * t * t * t); }
+    return y;
+  }
+  const surf = x => G.poolY + surfLocal((x - G.cx) / G.s) * G.s;
+
+  const mix = (a, b, t) => {
+    const pa = [1, 3, 5].map(i => parseInt(a.substr(i, 2), 16)), pb = [1, 3, 5].map(i => parseInt(b.substr(i, 2), 16));
+    return `rgb(${pa.map((v, i) => Math.round(v + (pb[i] - v) * t)).join(',')})`;
+  };
+
+  function drawMonk(wet, t) {
+    const c = ctx;
+    c.save(); c.translate(G.cx, G.poolY); c.scale(G.s, G.s);
+    // 바위
+    let g = c.createLinearGradient(0, -42, 0, 4);
+    g.addColorStop(0, '#56646a'); g.addColorStop(1, '#232c30');
+    c.fillStyle = g;
+    c.beginPath(); c.moveTo(-104, 4); c.bezierCurveTo(-100, -30, -60, -44, 0, -42); c.bezierCurveTo(60, -44, 100, -30, 104, 4); c.closePath(); c.fill();
+
+    const robe = mix('#e2892c', '#8f4614', wet), robeDark = mix('#b4561b', '#5c2a0c', wet);
+    const skin = mix('#e4b58a', '#c99670', wet * 0.6);
+    // 가부좌한 다리
+    c.fillStyle = robe; c.beginPath(); c.ellipse(0, -50, 76, 17, 0, 0, Math.PI * 2); c.fill();
+    c.strokeStyle = robeDark; c.lineWidth = 2;
+    c.beginPath(); c.moveTo(-60, -46); c.quadraticCurveTo(-20, -40, 10, -52); c.moveTo(60, -46); c.quadraticCurveTo(20, -40, -10, -52); c.stroke();
+    // 몸통
+    c.fillStyle = robe;
+    c.beginPath(); c.moveTo(-46, -116); c.quadraticCurveTo(-60, -90, -56, -56); c.lineTo(56, -56);
+    c.quadraticCurveTo(60, -90, 46, -116); c.quadraticCurveTo(0, -130, -46, -116); c.fill();
+    // 가사(띠)
+    c.fillStyle = robeDark;
+    c.beginPath(); c.moveTo(-46, -116); c.lineTo(-28, -122); c.lineTo(57, -70); c.lineTo(56, -56); c.lineTo(42, -56); c.closePath(); c.fill();
+    // 목
+    c.fillStyle = skin; c.fillRect(-7, -130, 14, 14);
+    // 팔
+    c.strokeStyle = robe; c.lineWidth = 17; c.lineCap = 'round'; c.lineJoin = 'round';
+    c.beginPath(); c.moveTo(-42, -108); c.lineTo(-40, -80); c.lineTo(-12, -92); c.stroke();
+    c.beginPath(); c.moveTo(42, -108); c.lineTo(40, -80); c.lineTo(12, -92); c.stroke();
+    // 합장한 손
+    c.fillStyle = skin;
+    c.beginPath(); c.moveTo(-8, -88); c.quadraticCurveTo(-9, -110, 0, -122); c.quadraticCurveTo(9, -110, 8, -88); c.closePath(); c.fill();
+    c.strokeStyle = 'rgba(90,50,30,.4)'; c.lineWidth = 1; c.beginPath(); c.moveTo(0, -120); c.lineTo(0, -90); c.stroke();
+    // 귀 & 머리
+    c.fillStyle = skin;
+    c.beginPath(); c.ellipse(-20, -140, 4, 6, 0, 0, Math.PI * 2); c.fill();
+    c.beginPath(); c.ellipse(20, -140, 4, 6, 0, 0, Math.PI * 2); c.fill();
+    g = c.createRadialGradient(-6, -150, 2, 0, -142, 22);
+    g.addColorStop(0, mix('#f3cda6', '#d9a98a', wet * 0.5)); g.addColorStop(1, skin);
+    c.fillStyle = g; c.beginPath(); c.arc(0, -142, 20, 0, Math.PI * 2); c.fill();
+    // 감은 눈, 입
+    c.strokeStyle = '#5a3a24'; c.lineWidth = 1.6; c.lineCap = 'round';
+    c.beginPath(); c.arc(-7, -142, 4, 0.15 * Math.PI, 0.85 * Math.PI); c.stroke();
+    c.beginPath(); c.arc(7, -142, 4, 0.15 * Math.PI, 0.85 * Math.PI); c.stroke();
+    c.beginPath(); c.moveTo(-3, -131); c.lineTo(3, -131); c.stroke();
+    // 젖은 광택
+    c.strokeStyle = `rgba(255,255,255,${0.25 + wet * 0.45})`; c.lineWidth = 2.5;
+    c.beginPath(); c.arc(0, -142, 17, 1.15 * Math.PI, 1.6 * Math.PI); c.stroke();
+    if (wet > 0.05) {
+      // 머리/어깨를 타고 흐르는 물막
+      c.strokeStyle = `rgba(225,245,255,${Math.min(0.6, wet * 0.6)})`; c.lineWidth = 2 + wet * 3;
+      c.beginPath(); c.arc(0, -142, 21, 1.05 * Math.PI, 1.95 * Math.PI); c.stroke();
+      c.lineWidth = 1.5 + wet * 2;
+      c.beginPath(); c.moveTo(-46, -116); c.quadraticCurveTo(-24, -124, -10, -124); c.moveTo(46, -116); c.quadraticCurveTo(24, -124, 10, -124); c.stroke();
+      // 몸을 타고 흐르는 물줄기
+      c.strokeStyle = `rgba(225,245,255,${Math.min(0.35, wet * 0.35)})`; c.lineWidth = 1.5;
+      c.setLineDash([10, 14]); c.lineDashOffset = -t * 120;
+      for (const x of [-50, -30, 30, 50]) { c.beginPath(); c.moveTo(x, -114); c.lineTo(x * 1.12, -58); c.stroke(); }
+      c.setLineDash([]);
+    }
+    // 수면 경계 거품
+    c.strokeStyle = `rgba(230,245,255,${0.35 + wet * 0.3})`; c.lineWidth = 2;
+    c.beginPath(); c.ellipse(0, 2, 108, 6, 0, 0, Math.PI * 2); c.stroke();
+    c.restore();
+  }
+
+  // 물 입자
+  const MAX = 5000;
+  let drops = [], ripples = [], I = 0, spawnAcc = 0;
+  const STREAKS = Array.from({ length: 70 }, () => ({ f: Math.random() - 0.5, d: 20 + Math.random() * 60, g: 20 + Math.random() * 70, v: 600 + Math.random() * 600 }));
+  STREAKS.sort((a, b) => Math.abs(a.f) - Math.abs(b.f));
+
+  const streamW = () => Math.min(10 + I * 9, 230) * G.s;
+  const spawnRate = () => 35 + 75 * I + 7 * I * I;
+
+  function spawn() {
+    const w = streamW(), off = (Math.random() - 0.5) * w;
+    drops.push({ x: G.cx + off, y: G.lipY + Math.random() * 4, vx: off / (w / 2 + 1) * 18 * G.s + (Math.random() - 0.5) * 12, vy: 40 + Math.random() * 120, spray: false });
+  }
+  function hit(p, sy) {
+    if (drops.length > MAX) return;
+    const onMonk = sy < G.poolY - 1;
+    if (p.spray) {
+      if (!onMonk && Math.random() < 0.02) addRipple(p.x);
+      return;
+    }
+    if (onMonk) {
+      const n = Math.random() < 0.55 ? 1 : 2;
+      const dir = Math.sign(p.x - G.cx) || (Math.random() < 0.5 ? -1 : 1);
+      for (let i = 0; i < n; i++) {
+        drops.push({ x: p.x, y: sy - 1, vx: (dir * (40 + Math.random() * 170) + (Math.random() - 0.5) * 90) * G.s, vy: -(60 + Math.random() * 220) * G.s, spray: true });
+      }
+    } else {
+      if (Math.random() < 0.35) drops.push({ x: p.x, y: sy - 1, vx: (Math.random() - 0.5) * 160 * G.s, vy: -(40 + Math.random() * 180) * G.s, spray: true });
+      if (Math.random() < 0.05) addRipple(p.x);
+    }
+  }
+  function addRipple(x) {
+    if (ripples.length > 60) return;
+    ripples.push({ x, y: G.poolY + (4 + Math.random() * 18) * G.s, r: 2, max: (20 + Math.random() * 40) * G.s });
+  }
+
+  function drawPool(t) {
+    const { poolY, s } = G;
+    const g = ctx.createLinearGradient(0, poolY, 0, H);
+    g.addColorStop(0, '#2f6170'); g.addColorStop(1, '#0b1d25');
+    ctx.fillStyle = g; ctx.fillRect(0, poolY, W, H - poolY);
+    ctx.strokeStyle = 'rgba(200,235,250,.10)'; ctx.lineWidth = 1;
+    for (let i = 0; i < 14; i++) {
+      const y = poolY + 6 + i * (H - poolY) / 14;
+      ctx.beginPath();
+      for (let x = 0; x <= W; x += 20) {
+        const yy = y + Math.sin(x * 0.03 + t * 1.5 + i) * 1.5;
+        x === 0 ? ctx.moveTo(x, yy) : ctx.lineTo(x, yy);
+      }
+      ctx.stroke();
+    }
+    // 낙수 지점 거품
+    const fw = streamW() * 1.3 + 60 * s;
+    const fg2 = ctx.createRadialGradient(G.cx, poolY + 4, 0, G.cx, poolY + 4, fw);
+    fg2.addColorStop(0, `rgba(235,248,255,${Math.min(0.15 + I * 0.04, 0.55)})`); fg2.addColorStop(1, 'rgba(235,248,255,0)');
+    ctx.fillStyle = fg2; ctx.beginPath(); ctx.ellipse(G.cx, poolY + 6, fw, fw * 0.18, 0, 0, Math.PI * 2); ctx.fill();
+  }
+
+  function drawSheet(t) {
+    const { cx, lipY, poolY, s } = G, w = streamW();
+    const a = Math.min(0.06 + I * 0.045, 0.5);
+    const g = ctx.createLinearGradient(cx - w / 2, 0, cx + w / 2, 0);
+    g.addColorStop(0, 'rgba(200,230,245,0)'); g.addColorStop(0.25, `rgba(215,238,250,${a})`);
+    g.addColorStop(0.75, `rgba(215,238,250,${a})`); g.addColorStop(1, 'rgba(200,230,245,0)');
+    ctx.fillStyle = g; ctx.fillRect(cx - w / 2, lipY, w, poolY - lipY);
+    // 흐르는 결
+    const n = Math.min(STREAKS.length, 3 + Math.floor(I * 5));
+    ctx.lineWidth = Math.max(1, 1.5 * s);
+    ctx.strokeStyle = `rgba(240,250,255,${Math.min(0.18 + I * 0.05, 0.6)})`;
+    for (let i = 0; i < n; i++) {
+      const st = STREAKS[i], x = cx + st.f * w;
+      ctx.setLineDash([st.d * s, st.g * s]);
+      ctx.lineDashOffset = -((t * st.v) % ((st.d + st.g) * s));
+      ctx.beginPath(); ctx.moveTo(x, lipY); ctx.lineTo(x, surf(x)); ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    // 낙구 거품
+    const lg = ctx.createRadialGradient(cx, lipY, 0, cx, lipY, w * 0.7 + 10);
+    lg.addColorStop(0, `rgba(245,252,255,${Math.min(0.3 + I * 0.05, 0.8)})`); lg.addColorStop(1, 'rgba(245,252,255,0)');
+    ctx.fillStyle = lg; ctx.beginPath(); ctx.ellipse(cx, lipY + 2, w * 0.7 + 10, 8 * s + I, 0, 0, Math.PI * 2); ctx.fill();
+  }
+
+  function drawMist() {
+    const { cx, headY, poolY, s } = G;
+    let r = (60 + I * 16) * s;
+    let g = ctx.createRadialGradient(cx, headY, 0, cx, headY, r);
+    g.addColorStop(0, `rgba(230,245,255,${Math.min(0.05 + I * 0.03, 0.35)})`); g.addColorStop(1, 'rgba(230,245,255,0)');
+    ctx.fillStyle = g; ctx.fillRect(cx - r, headY - r, r * 2, r * 2);
+    r = (120 + I * 22) * s;
+    g = ctx.createRadialGradient(cx, poolY, 0, cx, poolY, r);
+    g.addColorStop(0, `rgba(230,245,255,${Math.min(0.06 + I * 0.025, 0.3)})`); g.addColorStop(1, 'rgba(230,245,255,0)');
+    ctx.fillStyle = g; ctx.fillRect(cx - r, poolY - r, r * 2, r * 2);
+  }
+
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min((now - last) / 1000, 0.05); last = now;
+    const t = now / 1000;
+
+    // 스탑워치 상태
+    const e = elapsed(), level = Math.floor(e / 10000);
+    timeEl.innerHTML = fmtHTML(e);
+    lvlEl.textContent = levelName(level);
+    progEl.style.width = ((e % 10000) / 100).toFixed(2) + '%';
+    if (level > lastLevel) { lastLevel = level; toast(`${levelName(level)} — 물줄기가 거세집니다`); }
+    I += (level - I) * Math.min(1, dt * 1.2);
+
+    // 입자 갱신
+    spawnAcc += spawnRate() * dt;
+    while (spawnAcc >= 1) { spawnAcc--; if (drops.length < MAX) spawn(); }
+    const grav = H * 1.9;
+    for (let i = drops.length - 1; i >= 0; i--) {
+      const p = drops[i];
+      p.vy += grav * dt; p.x += p.vx * dt; p.y += p.vy * dt;
+      const sy = surf(p.x);
+      if (p.y >= sy && p.vy > 0) {
+        drops[i] = drops[drops.length - 1]; drops.pop();
+        hit(p, sy);
+      } else if (p.x < -20 || p.x > W + 20) {
+        drops[i] = drops[drops.length - 1]; drops.pop();
+      }
+    }
+    for (let i = ripples.length - 1; i >= 0; i--) {
+      const r = ripples[i]; r.r += 40 * G.s * dt;
+      if (r.r > r.max) ripples.splice(i, 1);
+    }
+
+    // 그리기
+    ctx.drawImage(bg, 0, 0, W, H);
+    drawPool(t);
+    ctx.lineWidth = 1;
+    for (const r of ripples) {
+      ctx.strokeStyle = `rgba(230,245,255,${0.5 * (1 - r.r / r.max)})`;
+      ctx.beginPath(); ctx.ellipse(r.x, r.y, r.r, r.r * 0.25, 0, 0, Math.PI * 2); ctx.stroke();
+    }
+    drawSheet(t);
+    drawMonk(Math.min(1, I / 8), t);
+
+    ctx.lineCap = 'round';
+    ctx.lineWidth = Math.max(1.1, 1.6 * G.s);
+    ctx.strokeStyle = 'rgba(225,242,255,.6)';
+    ctx.beginPath();
+    for (const p of drops) if (!p.spray) { ctx.moveTo(p.x, p.y); ctx.lineTo(p.x - p.vx * 0.012, p.y - p.vy * 0.014); }
+    ctx.stroke();
+    ctx.lineWidth = Math.max(1.3, 2 * G.s);
+    ctx.strokeStyle = 'rgba(240,250,255,.75)';
+    ctx.beginPath();
+    for (const p of drops) if (p.spray) { ctx.moveTo(p.x, p.y); ctx.lineTo(p.x - p.vx * 0.012, p.y - p.vy * 0.012); }
+    ctx.stroke();
+
+    drawMist();
+    ctx.drawImage(fg, 0, 0, W, H);
+    requestAnimationFrame(frame);
+  }
+
+  addEventListener('resize', resize);
+  resize();
+  updateButtons();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
